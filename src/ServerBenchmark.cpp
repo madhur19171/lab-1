@@ -18,6 +18,8 @@
 
 #include "ProcParser.cpp"
 
+#define THRESHOLD_DELAY 200000 /* 200us delay threshold */
+
 #define GET_FD(fd, map_name)                   \
   fd = bpf_map__fd(skel.get()->maps.map_name); \
   if (fd == -EINVAL) return -1;
@@ -368,6 +370,10 @@ void addOneCPU(int countFd) {
 
   // TODO: Code to add a CPU
   // cpuCount after lookup will contain the current value
+  if (cpuCount >= MAX_CPUS) return; // Can't add more than MAX_CPUS cores
+
+  cpuCount++;
+  if (bpf_map_update_elem(countFd, &key0, &cpuCount, 0)) exit(1);
 }
 
 /// removes one CPU from the core group
@@ -378,6 +384,10 @@ void removeOneCPU(int countFd) {
 
   // TODO: Code to remove a CPU
   // cpuCount after lookup will contain the current value
+  if (cpuCount <= MIN_CPUS) return; // Can't remove more than MIN_CPUS
+
+  cpuCount--;
+  if (bpf_map_update_elem(countFd, &key0, &cpuCount, 0)) exit(1);
 }
 
 /// @return the average queuing delay across all cores that have sent packets
@@ -507,6 +517,9 @@ int redirectProgDynamicCoreAllocation(std::vector<int>& availCpus, std::string& 
 
     // BEGIN: CORE ADDITION LOGIC
     // TODO: Add logic to observe queueing delay and add cores
+    if (computeAverageQueuingDelay(totalSrvTimeFd, rxCtrFd) > THRESHOLD_DELAY) {
+      addOneCPU(countFd);
+    }
     // END: CORE ADDITION LOGIC
 
     // clear arrays - state is kept per-window

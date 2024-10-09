@@ -295,12 +295,13 @@ bpfnic_benchmark_parse_and_timestamp_packet(struct xdp_md *ctx,
 SEC("xdp")
 int bpf_redirect_roundrobin(struct xdp_md *ctx)
 {
-	__u32 *cpu_selected, *cpu_iterator, *cpu_count;
+	__u32 *cpu_selected, *cpu_iterator, *cpu_count, *cpu_available;
 	struct packet *packet;
 	__u64 *rx_ctr;
 	__u32 cpu_dest = 0;
 	__u32 key0 = 0;
 	__u32 cpu_idx;
+	__u32 status;
 
 	// increment received packets atomically
 	rx_ctr = bpf_map_lookup_elem(&rx_packet_ctr, &key0);
@@ -317,6 +318,49 @@ int bpf_redirect_roundrobin(struct xdp_md *ctx)
 	}
 
 	// TODO: make redirection decision
+
+	// bpf_printk ("Redirect Called\n");
+
+	// Obtain the CPU to redirect the packet to
+	cpu_iterator = bpf_map_lookup_elem(&cpu_iter, &key0);
+	if (cpu_iterator == NULL) {
+		// bpf_printk ("Null Iterator\n");
+		return XDP_DROP;
+	}
+	// Obtain maximum number of CPUs to wrap around
+	cpu_count = bpf_map_lookup_elem(&cpus_count, &key0);
+	if (cpu_count == NULL) {
+		// bpf_printk ("Null Max CPU\n");
+		return XDP_DROP;
+	}
+	__u32 next_cpu = (*cpu_iterator + 1) % (*cpu_count) ;
+	if (bpf_map_update_elem(&cpu_iter, &key0, &next_cpu, 0) != 0) {
+		// bpf_printk ("Update Failed\n");
+		return XDP_DROP;
+	}	// Update the next CPU to be chosen for redirection
+		// This needs to be done before any returning anything
+		// Otherwise we may end up with a situation where a faulty CPU
+		// is always selected for every packet and we drop everything
+
+	// Check if the selected CPU can be used for redirecting
+	cpu_available = bpf_map_lookup_elem(&cpus_available, cpu_iterator);
+	if (cpu_available == NULL) {
+		// bpf_printk ("Null Available CPU\n");
+		return XDP_DROP;
+	}
+
+	if (*cpu_available != *cpu_iterator) {	// cpu_available is not boolean, key and value are the same if cpu is available
+		// bpf_printk ("CPU Not Available\n");
+		return XDP_ABORTED;
+	}
+
+	if (bpf_redirect_map(&cpu_map, *cpu_available, 0) != 0) {	// Returns 0 on failure
+		// bpf_printk ("Redirect to CPU %d\n", *cpu_iterator);
+		return XDP_REDIRECT;	// Return XDP_REDIRECT on success
+	}
+
+	// bpf_printk ("Drop!\n");
+
 	return XDP_DROP;
 }
 
@@ -357,6 +401,7 @@ int bpf_redirect_roundrobin_core_separated(struct xdp_md *ctx)
 {
 	__u32 *cpu_selected, *cpu_iterator_short, *cpu_iterator_long;
 	__u32 *cpu_count_long, *cpu_count_short;
+	__u32 *cpu_available_short_reqs, *cpu_available_long_reqs;
 	struct packet *packet;
 	void *selected_map;
 	__u32 cpu_dest = 0;
@@ -376,7 +421,99 @@ int bpf_redirect_roundrobin_core_separated(struct xdp_md *ctx)
 	if (!bpfnic_benchmark_parse_and_timestamp_packet(ctx, &nh))
 		return XDP_PASS;
 
+	packet = (struct packet *) nh.pos;
+
+	if (packet + 1 > data_end) {
+		bpf_printk ("Out Of Boundary Packet\n");
+		return XDP_DROP;
+	}
+
+	if (packet->data >= 10) {
+		// Long Packet Processing
+
+		// bpf_printk ("Long Packet: %d\n", packet->data);
+
+		// Obtain the CPU to redirect the packet to
+		cpu_iterator_long = bpf_map_lookup_elem(&cpu_iter_core_separated, &key1);
+		if (cpu_iterator_long == NULL) {
+			// bpf_printk ("Null Iterator\n");
+			return XDP_DROP;
+		}
+		// Obtain maximum number of CPUs to wrap around
+		cpu_count_long = bpf_map_lookup_elem(&cpu_count_core_separated, &key1);
+		if (cpu_count_long == NULL) {
+			// bpf_printk ("Null Max CPU\n");
+			return XDP_DROP;
+		}
+		__u32 next_cpu = (*cpu_iterator_long + 1) % (*cpu_count_long) ;
+		if (bpf_map_update_elem(&cpu_iter_core_separated, &key1, &next_cpu, 0) != 0) {
+			// bpf_printk ("Update Failed\n");
+			return XDP_DROP;
+		}	// Update the next CPU to be chosen for redirection
+			// This needs to be done before any returning anything
+			// Otherwise we may end up with a situation where a faulty CPU
+			// is always selected for eery packet and we drop everything
+
+		// Check if the selected CPU can be used for redirecting
+		cpu_available_long_reqs = bpf_map_lookup_elem(&cpus_available_long_reqs, cpu_iterator_long);
+		if (cpu_available_long_reqs == NULL) {
+			// bpf_printk ("Null Available CPU\n");
+			return XDP_DROP;
+		}
+
+		if (*cpu_available_long_reqs > 7) {	// Max 8 CPUs available
+			bpf_printk ("CPU Not Available: Av: %d\tIter: %d\n", *cpu_available_long_reqs, *cpu_iterator_long);
+			return XDP_ABORTED;
+		}
+
+		if (bpf_redirect_map(&cpu_map, *cpu_available_long_reqs, 0) != 0) {	// Returns 0 on failure
+			// bpf_printk ("Redirect to CPU %d\n", *cpu_iterator_long);
+			return XDP_REDIRECT;	// Return XDP_REDIRECT on success
+		}
+	} else {
+		// Short Packet Processing
+
+		// Obtain the CPU to redirect the packet to
+		cpu_iterator_short = bpf_map_lookup_elem(&cpu_iter_core_separated, &key0);
+		if (cpu_iterator_short == NULL) {
+			// bpf_printk ("Null Iterator\n");
+			return XDP_DROP;
+		}
+		// Obtain maximum number of CPUs to wrap around
+		cpu_count_short = bpf_map_lookup_elem(&cpu_count_core_separated, &key0);
+		if (cpu_count_short == NULL) {
+			// bpf_printk ("Null Max CPU\n");
+			return XDP_DROP;
+		}
+		__u32 next_cpu = (*cpu_iterator_short + 1) % (*cpu_count_short) ;
+		if (bpf_map_update_elem(&cpu_iter_core_separated, &key0, &next_cpu, 0) != 0) {
+			// bpf_printk ("Update Failed\n");
+			return XDP_DROP;
+		}	// Update the next CPU to be chosen for redirection
+			// This needs to be done before any returning anything
+			// Otherwise we may end up with a situation where a faulty CPU
+			// is always selected for eery packet and we drop everything
+
+		// Check if the selected CPU can be used for redirecting
+		cpu_available_short_reqs = bpf_map_lookup_elem(&cpus_available_short_reqs, cpu_iterator_short);
+		if (cpu_available_short_reqs == NULL) {
+			// bpf_printk ("Null Available CPU\n");
+			return XDP_DROP;
+		}
+
+		if (*cpu_available_short_reqs > 7) {	// Max 8 CPUs available
+			// bpf_printk ("CPU Not Available\n");
+			return XDP_ABORTED;
+		}
+
+		if (bpf_redirect_map(&cpu_map, *cpu_available_short_reqs, 0) != 0) {	// Returns 0 on failure
+			// bpf_printk ("Redirect to CPU %d\n", *cpu_iterator);
+			return XDP_REDIRECT;	// Return XDP_REDIRECT on success
+		}
+	}
+
 	// TODO: make redirection decision
+
 	return XDP_DROP;
 }
 
